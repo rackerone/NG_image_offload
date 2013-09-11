@@ -20,6 +20,15 @@
 
 ###+_+_+_+_+_+_+_+_+_+_++_+_+###
 #Save Next Generation server images to remote location like cloud files.  Allow download locally and restore
+"""
+need to:
+-add a check of the SOURCE server to see which datacenter it lives in....this is necessary because out dd tranfer of over service net.
+-verify download and install of packages necessary to make this work
+-check os of SOURCE....need to adjust install commands for each os.  Ubuntu source require apt-get update, then apt-get -y install {packages}
+-For significant speed improvement use netcat for transfer but lose security of encryption.  I want to experiment with encrypting image data on the fly
+  ....possibly hmac or similar to hash each block of data before sending over wire.
+
+"""
 
 import os
 import re
@@ -61,13 +70,13 @@ os.system('cls' if os.name=='nt' else 'clear')
 #### SETUP SOME GLOBAL VARIABLES ###
 print "Setting up gloabal variables..."
 CREDS_FILE = os.path.expanduser("~/.rackspace_cloud_credentials")    #<----set credentials file used to authenticate to Rackspace cloud
-REGIONS = ["DFW", "ORD", "LON"]    #<----these are the currently supported reagions
+REGIONS = ["DFW", "ORD", "LON"]    #<----these are the currently supported regions
 SOURCE_UUID = ''     #<----this is will ultimately hold the uuid of the source server we want to image
 OFFLOAD_UUID = ''    #<----this is the uuid of the OFFLOAD server that be the destination for our NG image
 SATA_VOLUME = ''    #<---this will hold the size of the sata volume to create
 SPACER = "\n\n"   #<---this will provide a blank two-line seperator for formatting purposes
 print "Done!"
-print "=============="
+print "============================"
 
 
 ### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###==### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###
@@ -92,8 +101,8 @@ def initiate_SSH(server):
   except:
     pass
   ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-  myrsakeyfile = os.path.expanduser("~/.ssh/id_rsa.pub")
-  ssh.connect(server, username='root', key_filename=myrsakeyfile, timeout=60)
+  MY_RSAKEY_FILE = os.path.expanduser("~/.ssh/id_rsa.pub")
+  ssh.connect(server, username='root', key_filename=MY_RSAKEY_FILE, timeout=60)
   invokedShell = ssh.invoke_shell()
   transport = ssh.get_transport()  #not using this currently but get access to channels this way
 
@@ -154,7 +163,7 @@ pyrax.set_credential_file(CREDS_FILE)
 print "Setting up default region of DFW..."
 pyrax.set_default_region("DFW") 
 print "Done!"
-print "=============="
+print "============================"
 
 ### Create connections to different regions and gather list of servers ###
 print "Establishing connections to DFW and ORD and compiling list of servers.  This may take a few minutes..."
@@ -171,14 +180,14 @@ cs_ord_servers = cs_ord_conn.servers.list()
 #Set up a list of all servers from each region combined into a single list
 all_servers = cs_dfw_servers + cs_ord_servers
 print "Done!"
-print "=============="
+print "============================"
 
 ### Server UUID list ###
 print "Setting up list of server UUIDs used to validate user supplied SOURCE UUID is an actual valid UUID..."
 #Create a list of server UUID's that we will use to verify that user supplied source UUID is valid.  
 server_UUIDs = [server.id for server in all_servers]
 print "Done!"
-print "=============="
+print "============================"
 
 
 
@@ -186,20 +195,10 @@ print "=============="
 ######################################## Get User Input.  Choose from menu which server to image ##############################
 ### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###==### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###
 
-
-#Set up regex for IP4 address (omit ipv6). Assign group name 'public_ip4' to the ip address.  NOTE - THE ATTRIBUTE myserver.accessIP4 will work
-###regex = re.compile(r'(?P<public_ip4>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
-###for server in all_servers:
-###    for ip in server.networks['public']:
-###      result = regex.search(ip)
-###      if result:
-###        SOURCE_public_ip = result.group('public_ip4')
-#----->NOTE = don't really need this because we can access the private ip through attribute server.accessIP4
-
 #Clear the screen and present our servers to choose from 
 os.system('cls' if os.name=='nt' else 'clear')
 
-#Initialize public/private ip variables (although not necessary)
+#Initialize public/private ip variables
 SOURCE_public_ip = ''
 SOURCE_private_ip = ''
 print "\n\nCHOOSE FROM THE FOLLOWING LIST OF SERVERS.  Please copy the UUID and enter below as the value for 'SOURCE Server UUID'\n"
@@ -207,12 +206,7 @@ for server in all_servers:
   SOURCE_public_ip = server.accessIPv4
   SOURCE_private_ip = server.networks['private'][0]
   print "Server Name: %s \tServer UUID: %s \t" % (server.name, server.id)
-  #print "Server UUID: %s" % server.id
-  #print "Flavor: %s" % server.flavor['id']
-  #print "Public IP: %s" % server.accessIPv4
-  #print "Private IP: %s" % SOURCE_private_ip
 print "============================"
-
 
 #We need to wait for user input here (should be UUID).  We will compare this UUID to list of known UUIDs.  If not present we re-prompt for user input
 while True:
@@ -223,31 +217,28 @@ while True:
   break   #<---if SOURCE_UUID was in the list then break out of the loop
 print "\n\n"
 
-
-
-### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###==### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###
-################################################### PROCESS SOURCE SERVER ##################################################
-### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###==### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###
-#Now that we have a SOURCE_UUID we can create a server object using this UUID.  Then we can place it in rescue mode and continue operations on it.
-
-print "Processing SOURCE server...\n...\n"
-print "Calculating the amount of SATA block storage needed to accomodate this request based on SOURCE server chosen..."
-#Setting up a dictionary to hold SATA cbs volume sizes in GB as values and the flavor IDs that small enough to fit on them as the keys
-sata_cbs_dict = {2:100, 3:100, 4:100, 5:200, 6:400, 7:700, 8:1200}
-#Build 
+#Instantiate server object using the UUID of the server we chose above (SOURCE server)
 my_source = cs.servers.get(SOURCE_UUID)
+
+#Echo choice to user
+print "You chose server '%s' with UUID '%s'\n\n" % (my_source.name, my_source.id)
+
+#Calculate sata volume size
+print "Calculating the amount of SATA block storage needed to accomodate this request based on SOURCE server chosen..."
+#This dictionary is organized so that each flavor key has a 'sata volume size in GB' as the value....we compare our SOURCE server
+#to this dictionary and get the appropriate size sata volume to accomodate the entire allocated disk on SOURCE server.
+sata_cbs_dict = {2:100, 3:100, 4:100, 5:200, 6:400, 7:700, 8:1200}
 source_flavor = my_source.flavor['id']  #<--determine flavor so we can attach the appropriate size block storage on temp server
 source_disk = cs.flavors.get(source_flavor).disk #<---determine allocated disk size for SOURCE server.
 SATA_VOLUME = [value for key,value in sata_cbs_dict.items() if key is int(source_flavor)]
 print "Done!"
-print "\SOURCE server's allocated disk size is %sGB." % source_disk
-print "We will need to create a %s SATA Block Storage device large enough to hold this." % SATA_VOLUME[0]
-print "\n\n"
-print "=============="
-
+print "============================"
+print "Getting IP addresses for SOURCE server..."
 #Set up variables to hold public and private IP address for our SOURCE server
 source_publicIP = my_source.accessIPv4
 source_privateIP = my_source.networks['private'][0]
+print "Done!"
+print "============================"
 
 #Print details of our SOURCE server.  This is the server we want to GET a copy of sent to our OFFLOAD server we will build
 print "SOURCE server details.  This is the server that we are GETTING a copy of and sending to our OFFLOAD server --->"
@@ -256,7 +247,7 @@ print "\tAllocated Disk Size: %sGB" % source_disk
 print "\tRecommended SATA Volume Size: %GB" % SATA_VOLUME[0]
 print "\tPublic IP: %s" % source_publicIP
 print "\tPrivate IP: %s" % source_privateIP
-print "=============="
+print "============================"
 
 
 
@@ -268,7 +259,7 @@ print "=============="
 print "Preparing to build OFFLOAD server that will be the destination for our dd image transfer..."
 print "..."
 
-print "Setting base image, flavor, and name of OFFLOAD server to be used during server build.."
+print "Setting base image, flavor, and name of OFFLOAD server to be used during server build..."
 #create server image object for centos 6.4
 centos_image = [img for img in cs.images.list() if "CentOS 6.4" in img.name][0]
 #create a flaver object used in server creation
@@ -278,10 +269,10 @@ server_unique_id = pyrax.utils.random_name(8, ascii_only=True)    #<----create a
 #create the OFFLOAD server name by adding the unique id to base name 'OFFLOAD.NG_image.'
 server_name = "OFFLOAD.NG_image." + server_unique_id
 print "Done!"
-print "=============="
+print "============================"
 
 #We need to create a keypair so that we can utilize ssh keys later.  This keypair will allow us to load our public ssh key onto OFFLOAD server during build
-myrsakeyfile = os.path.expanduser("~/.ssh/id_rsa.pub")
+MY_RSAKEY_FILE = os.path.expanduser("~/.ssh/id_rsa.pub")
 existing_keypairs = cs.keypairs.list()
 #
 #I could use this loop to delete the existing keypairs.  I am just attempting the create and letting it pass an exception if it already exists.
@@ -295,15 +286,15 @@ existing_keypairs = cs.keypairs.list()
 #else:
 #    print "No existing keypairs found!"
 #
-print "Creating new key pair for our OFFLOAD server using public ssh key located at %s..." % myrsakeyfile
+print "Creating new key pair for our OFFLOAD server using public ssh key located at %s..." % MY_RSAKEY_FILE
 try:
-  with open(os.path.expanduser(myrsakeyfile)) as keyfile:
+  with open(os.path.expanduser(MY_RSAKEY_FILE)) as keyfile:
     cs.keypairs.create("OFFLOAD_server_key", keyfile.read())
 except Exception as e:      #<---if this key already exists it will error but we are bypassing if that is the case
   print e
   pass
 print "Done!"
-print "=============="
+print "============================"
 
 #Create our OFFLOAD server with keypair and wait until it is in ACTIVE/ERROR status
 print "Creating the server with keypair and waiting until is it in 'Active' state.  This may take several seconds..."
@@ -314,7 +305,7 @@ if my_offload.status == "ERROR":
   time.sleep(5)
   sys.exit(1)
 print "Done!"
-print "=============="
+print "============================"
 
 #Set up variables to hold the public/private
 offload_publicIP = my_offload.accessIPv4
@@ -328,7 +319,7 @@ print "\tStatus:", my_offload.status
 print "\tAdmin Password:", my_offload.adminPass
 print "\tPublic Network used for SSH access:", offload_publicIP
 print "\tPrivate network (service net) used for access to this server from within the same DC/Region:", offload_privateIP
-print "=============="
+print "============================"
 
 
 
@@ -348,23 +339,23 @@ vol_name = "CBS_OFFLOAD_NG." + cbs_unique_id
 mountpoint = "/dev/xvdd"
 #create the volume....in this case a SATA volume.  I will provide the SSD example just below
 print "Done!"
-print "=============="
+print "============================"
 print "Creating a %sGB SATA volume..." % SATA_VOLUME[0]
 sata_vol = cbs.create(name=vol_name, size=SATA_VOLUME[0], volume_type="SATA")
 print "Successfully created block storage volume..."
 print "Volume name:", sata_vol.name
 print "Volume size:", SATA_VOLUME[0]
-print "SOURCE server where SATA volume will be attached:", my_source.name
+print "OFFLOAD server where SATA volume will be attached:", my_offload.name
 print "Mountpoint:", mountpoint
 print "\t--> The 'mountpoint' is device name that will be assigned to the SATA volume once attached to server"
-print "=============="
+print "============================"
 print "Attaching to target server.  This may take several seconds for the attachment to complete..."
 sata_vol.attach_to_instance(my_offload, mountpoint=mountpoint)
 pyrax.utils.wait_until(sata_vol, "status", "in-use", interval=3, attempts=0, verbose=True, verbose_atts="progress")
 print "Success!"
 print "Volume attachments:", sata_vol.attachments
 print "Done setting up temporary OFFLOAD server to cache NG image"
-print "=============="
+print "============================"
 """
 #TO DETACH volume later when tearing this stuff down
 sata_vol.detach()   #<----detach volume
@@ -383,49 +374,44 @@ ssh = paramiko.SSHClient()
 #ssh.load_host_keys(os.path.expanduser('~/.ssh/known_hosts'))   #<-not necessary
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 #ssh.load_system_host_keys() #<-not necessary
-ssh.connect(offload_publicIP, username='root', key_filename=myrsakeyfile, timeout=60)
+ssh.connect(offload_publicIP, username='root', key_filename=MY_RSAKEY_FILE, timeout=60)
 #ssh.connect(buffer_public_ip, username='root')
 print "Done!"
-print "=============="
+print "============================"
 print "Partitioning SATA Block Storage device..."
 stdin, stdout, stderr = ssh.exec_command("echo -e 'n\np\n1\n\n\nw\n' | fdisk %s" % mountpoint)  #<---partition our SATA volume all in one partition
 for line in stdout.readlines():
   print line
-print ""
-for line in stderr.readlines():
-  print line
 print "Done formatting volume.  Verify that new partition exists..."
-stdin, stdout, stderr = ssh.exec_command("fdisk -l /dev/xvdd")
-for line in stdout.readlines():
-  print line
-print ""
-for line in stderr.readlines():
-  print line
-print "Done!"
-print "=============="
+partitioned_device = mountpoint + str(1)
+print "partitioned_device = ", partitioned_device
+stdin, stdout, stderr = ssh.exec_command("if [ -b %s ]; then echo 'True'; else echo 'False'; fi" % partitioned_device)
+pre_result = stdout.read()
+post_result = re.sub('\n', '', pre_result)
+if post_result == "True":
+  print "Successfully created partition on SATA block storage device!"
+  print "post_result = ", post_result
+  print "pre_result = ", pre_result
+else:
+  print "Failed to create partition on SATA block storage device!  Exiting!"
+  #sys.exit(1)
+  print "post_result = ", post_result
+  print "pre_result = ", pre_result
+print "============================"
 print "Creating filesystem on SATA Block Storage volume..."
 stdin, stdout, stderr = ssh.exec_command("mkfs -t ext3 %s1" % mountpoint)
 for line in stdout.readlines():
   print line
-print ""
-for line in stderr.readlines():
-  print line
-print ""
 print "Done!"
-print "=============="
+#to verify the file system type    df -T | grep partitioned_device |  awk '{print $2}'
+print "============================"
 print "Mounting SATA Block storage device %s on 'mount'" % my_offload.name
 stdin, stdout, stderr = ssh.exec_command("mount -t ext3 %s1 /mnt" % mountpoint)
 for line in stdout.readlines():
   print line
-print ""
-for line in stderr.readlines():
-  print line
-print ""
 print "Done!"
-print "=============="
+print "============================"
 print "CBS storage and Offload server setup complete!\n\n"
-
-
 
 
 ### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###==### +_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+_+ ###
@@ -441,7 +427,7 @@ mystatus,myoutput = my_source.rescue()
 pyrax.utils.wait_until(my_source, "status", ["RESCUE", "ERROR"], attempts=0, verbose=True, verbose_atts="progress")
 my_source_rescue_pwd = myoutput['adminPass']
 print "Done!"
-print "=============="
+print "============================"
 print "RESCUED SOURCE SERVER DETAILS--->"
 print "\tName:", my_source.name
 print "\tRescue mode return status: ", mystatus
@@ -449,12 +435,12 @@ print "\tSource rescued server password: ", my_source_rescue_pwd
 print "\tPublic IP of rescued server: ", source_publicIP
 print "\tPrivate IP of rescued sever: ", source_privateIP
 print "Done!"
-print "=============="
+print "============================"
 #Need to remove the ssh key for our source server from our local computer or ssh w/ key will fail because fingerprint has changed after rescue mode.
 print "Removing SSH key from known hosts on this workstation (if ssh already exists for the SOURCE server)...."
 subprocess.call('ssh-keygen -R %s' % source_publicIP, shell=True)  #<--remove ssh key for SOURCE IP from known_hosts on my workstation
 print "Done!"
-print "=============="
+print "============================"
 #SSH to rescued source server from my workstation.  We will initialize image transfer
 print "Setting up SSH connection to rescued SOURCE server and configuring parameters..."
 #Set up ssh client
@@ -469,42 +455,41 @@ ssh_rescued_server.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 #Connect to server by calling connect() on the ssh client object
 ssh_rescued_server.connect(source_publicIP, username='root', password=my_source_rescue_pwd)
 print "Done!"
-print "=============="
+print "============================"
 #check for available disk devices
 print "Check for available disk devices..."
 stdin, stdout, stderr = ssh_rescued_server.exec_command("fdisk -l | grep '^Disk'")
 channel_out = stdout.channel
-print "Current clock time: ", now()
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "Current clock time: ", now()
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Checking recv exit status..."
 status = channel_out.recv_exit_status()
 print "recv exit status.. ===>", status
-print "--"
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
 print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
-print ""
 print "Done!"
-print "=============="
+print "============================"
 print "Verifying host name.  This should be the hostname of the Rescued server (SOURCE)..."
 stdin, stdout, stderr = ssh_rescued_server.exec_command("hostname")
 channel_out = stdout.channel
-print "Current clock time: ", now()
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "Current clock time: ", now()
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Checking recv exit status..."
 status = channel_out.recv_exit_status()
 print "recv exit status.. ===>", status
-print "--"
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "--"
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
@@ -512,7 +497,7 @@ print ""
 print "Expected hostname: %s" % my_source.name
 print ""
 print "Done!"
-print "=============="
+print "============================"
 print "Initialize sshpass setup.  First we will install dependencies.  GCC and make must be installed because the yum installation will fail on connection attempt  ..."
 print "Installing gcc.."
 stdin, stdout, stderr = ssh_rescued_server.exec_command("yum -y install gcc")
@@ -538,70 +523,67 @@ print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
-print ""
 print "Dependency resolution for sshpass complete!"
-print "=============="
+print "============================"
 print "Downloading sshpass source code ..."
 #NOTE - I am hosting this copy of sshpass on my cloud files account, published on the cdn.
 stdin, stdout, stderr = ssh_rescued_server.exec_command("wget http://e1446f058cab9ae44fbf-5cda71ed19c8d4f705f7d0efcc8652d5.r21.cf1.rackcdn.com/sshpass-1.05.tar.gz")
 channel_out = stdout.channel
-print "Current clock time: ", now()
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "Current clock time: ", now()
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Checking recv exit status..."
 status = channel_out.recv_exit_status()
 print "recv exit status.. ===>", status
-print "--"
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "--"
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
-print ""
 print "Download Complete!"
-print "=============="
+print "============================"
 print "Unpacking sshpass and cd into source directory; compile and install..."
 stdin, stdout, stderr = ssh_rescued_server.exec_command("tar -xzf sshpass-1.05.tar.gz; cd sshpass-1.05;./configure;make;make install")
 channel_out = stdout.channel
-print "Current clock time: ", now()
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "Current clock time: ", now()
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Checking recv exit status..."
 status = channel_out.recv_exit_status()
 print "recv exit status.. ===>", status
-print "--"
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "--"
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
-print ""
 print "sshpass compile and install complete!"
-print "=============="
+print "============================"
 print "Installing lzop for data compression on the wire..."
 stdin, stdout, stderr = ssh_rescued_server.exec_command("yum -y install lzop")
 channel_out = stdout.channel
-print "Current clock time: ", now()
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "Current clock time: ", now()
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Checking recv exit status..."
 status = channel_out.recv_exit_status()
 print "recv exit status.. ===>", status
-print "--"
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "--"
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
 print "Done!"
 print "=============="
-print "Initializing root disk transfer over the wire to remote buffer server..."
+print "Initializing root disk transfer over the wire to remote OFFLOAD server..."
 print "Source server: ", my_source.name
 transport = ssh.get_transport()
 channel = transport.open_session()
@@ -613,37 +595,41 @@ stdin, stdout, stderr = ssh_rescued_server.exec_command("time dd if=/dev/xvdb bs
 							-oStrictHostKeyChecking=no \
 							'dd of=/mnt/%s_root_img.lzo bs=2M'" % (my_offload.adminPass,offload_privateIP,my_offload.name))
 
-print "=>\n==>\n===>\n====>\n"
 print "=====>>Transferring copy of root disk from %s to %s over service net..." % (my_source.name, my_offload.name)
-print "=====>>>Sending block-level copy over encrypted ssh connection and LZOP compression..."
-print "=====>>>>Tranfer settings optimized for maximum speed while maintaining data privacy on the wire..."
+print "=====>>>Sending block-level copy over encrypted ssh connection with LZOP compression on the wire..."
+print "=====>>>>Tranfer settings optimized for maximum speed while maintaining data privacy using SSH for encryption..."
 print "======>>>>This make take several minutes...I have some benchmark tests I can provide to demonstrate speed associated with dd block size and compression tools"
 print "--"
-print "This is the current exit status....current exit status= ", channel.exit_status_ready()
+#print "This is the current exit status....current exit status= ", channel.exit_status_ready()
 channel_out = stdout.channel
-print "Current clock time: ", now()
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
-print "--"
+#print "Current clock time: ", now()
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
 print "Checking recv exit status..."
 status = channel_out.recv_exit_status()
 print "recv exit status.. ===>", status
-print "--"
-print "Checking channel exit ready status..."
-print "exit status ready ===>", channel_out.exit_status_ready()
+#print "--"
+#print "Checking channel exit ready status..."
+#print "exit status ready ===>", channel_out.exit_status_ready()
 print "--"
 print "Receiving response from server..."
 for line in stdout.readlines():
     print line
-print ""
-print 'Done! Imaged copied to OFFLOAD server...current exit status=', channel.exit_status_ready()
-print "=============="
+#print "Imaged copied to OFFLOAD server...current exit status=", channel.exit_status_ready()
+print 'Done!'
+print "============================"
 print "Closing connections to OFFLOAD server and rescued server"
 channel.close()
-print "Done!"
-print "==============" * 3
-print "==============" * 3
+print "Connction Closed!"
+print "============================"
+print "SOURCE server exiting rescue mode..."
+my_source.unrescue()
+pyrax.utils.wait_until(my_source, "status", ["ACTIVE", "ERROR"], attempts=0, verbose=True, verbose_atts="progress")
+print "Unrescue exit status:", mystatus
 
+print "============================" * 3
+print "============================" * 3
 
 #Print details for image retrieval
 print "OFFLOAD SERVER DETAILS"
@@ -664,10 +650,7 @@ print "\tRecommended SATA Volume Size: %GB" % SATA_VOLUME[0]
 print "\tPublic IP: %s" % source_publicIP
 print "\tPrivate IP: %s" % source_privateIP
 print "=============="
-print "Exiting SOURCE server rescue mode..."
-my_source.unrescue()
-pyrax.utils.wait_until(my_source, "status", ["ACTIVE", "ERROR"], attempts=0, verbose=True, verbose_atts="progress")
-print "Unrescue exit status:", mystatus
+
 
 print "all done for now!!!"
 
